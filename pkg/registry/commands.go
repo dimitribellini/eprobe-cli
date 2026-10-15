@@ -269,7 +269,9 @@ func ShowModuleHelp(name string) error {
 		localCandidates := []string{
 			filepath.Join("modules", name, "manifest.yaml"),
 			filepath.Join("..", "eprobe-modules", "modules", name, "manifest.yaml"),
-			filepath.Join("/root/antigravity/eprobe-prj/eprobe-modules/modules", name, "manifest.yaml"),
+		}
+		if envModDir := os.Getenv("EPROBE_MODULES_DIR"); envModDir != "" {
+			localCandidates = append([]string{filepath.Join(envModDir, name, "manifest.yaml")}, localCandidates...)
 		}
 		found := false
 		for _, cand := range localCandidates {

@@ -60,7 +60,7 @@ eprobe version
 > ```
 > 
 > *Need a pinned version? Use the tagged release syntax:*
-> `curl -sSL https://github.com/dimitribellini/eprobe-cli/releases/download/v0.0.85/eprobe-v0.0.85-linux-amd64 -o eprobe`
+> `curl -sSL https://github.com/dimitribellini/eprobe-cli/releases/download/v0.0.86/eprobe-v0.0.86-linux-amd64 -o eprobe`
 
 ### 2. Triage Your First Incident (Instant Run)
 
@@ -171,7 +171,7 @@ Need to triage collaboratively with your distributed incident response team? Str
 
 ```bash
 # Extract live kernel telemetry to collaborative Web Diagnostic View
-sudo eprobe run app/docker-monitor --stream-token 0486cf95-eb6a-4cf6-aa4e-d6ec1ffeaf03
+sudo eprobe run app/docker-monitor --stream-token 3a4b9c1d-8e7f-4a5b-9c8d-7e6f5a4b3c2d
 ```
 
 Renders a live terminal monitor with connection health and bandwidth metrics:
@@ -180,7 +180,7 @@ Renders a live terminal monitor with connection health and bandwidth metrics:
 ┌─ eprobe Incident Telemetry Ingestion ──────────────────────────────────┐
 │  Connection:       ● CONNECTED (Port 443 / TLS)                        │
 │  Target Broker:    https://stream.eprobe.io                            │
-│  Stream Token:     0486cf95-eb6a-4cf6-aa4e-d6ec1ffeaf03               │
+│  Stream Token:     3a4b9c1d-8e7f-4a5b-9c8d-7e6f5a4b3c2d               │
 │  Module:           app/docker-monitor (2.4.6)                          │
 │  Handshake:        ✔ Manifest Synchronized                             │
 │  Session Time:     00:03:42                                            │
@@ -191,7 +191,7 @@ Renders a live terminal monitor with connection health and bandwidth metrics:
 │  Data Transferred: 138.4 KB  (Raw: 1.12 MB, -87.6% Gzip savings)       │
 │                                                                        │
 │  👉 Live Diagnostic View:                                              │
-│  https://eprobe.io/dashboard/app-docker-monitor/0486cf95-eb6a-4cf6...  │
+│  https://eprobe.io/dashboard/app-docker-monitor/3a4b9c1d-8e7f-4a5b...  │
 │                                                                        │
 │  Press [Ctrl+C] or [q] to stop extraction and clean detach probe.      │
 └────────────────────────────────────────────────────────────────────────┘
