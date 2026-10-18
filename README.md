@@ -1,4 +1,4 @@
-# eprobe: Tactical Ephemeral eBPF Incident Response Toolkit
+# eprobe: Open-Source On-Demand Linux Incident & Security Diagnostic Tool
 
 <p align="center">
   <a href="https://eprobe.io/"><img src="https://img.shields.io/badge/Website-eprobe.io-00D26A?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Website" /></a>
@@ -9,8 +9,9 @@
 </p>
 
 <p align="center">
-  <b>The modern, zero-dependency eBPF replacement for <code>top</code>, <code>strace</code>, and <code>tcpdump</code>.</b><br />
-  Built for <b>Site Reliability Engineers (SREs), L3 Escalation Engineers, and Platform DevOps</b> to triage live production incidents with <b>&lt;1% CPU overhead</b> and <b>zero background daemons left behind</b>.
+  <b>Collect</b> system, application, and security signals in one click (no installation or 24/7 agent required).<br />
+  <b>Analyze</b> real-time incident data locally (<code>eprobe</code> Text Console) or online (<code>eprobe.io</code> Web Console) in a <b>Single Pane of Glass</b>.<br />
+  <b>Export</b> an <b>Anonymized AI Bundle</b> (IPs &amp; secrets masked) for root-cause evaluation with <b>Claude, ChatGPT, Gemini &amp; Ollama</b>.
 </p>
 
 <p align="center">
@@ -60,7 +61,7 @@ eprobe version
 > ```
 > 
 > *Need a pinned version? Use the tagged release syntax:*
-> `curl -sSL https://github.com/dimitribellini/eprobe-cli/releases/download/v0.0.86/eprobe-v0.0.86-linux-amd64 -o eprobe`
+> `curl -sSL https://github.com/dimitribellini/eprobe-cli/releases/download/v0.0.87/eprobe-v0.0.87-linux-amd64 -o eprobe`
 
 ### 2. Triage Your First Incident (Instant Run)
 
@@ -75,15 +76,15 @@ sudo eprobe run app/docker-monitor
 
 ---
 
-## 🎯 Why eprobe? The Three Tactical Pillars
+## 🎯 Why eprobe? The Three Core Pillars
 
-When standard APM platforms (Datadog, Grafana) alert that a system is degraded, they lack the kernel-level resolution to explain **why**. Legacy diagnostic tools like `strace` attach via `ptrace` and impose a catastrophic 100x performance penalty that risks freezing production databases. `eprobe` bridges this critical gap using read-only CO-RE eBPF:
+When standard monitoring platforms (Datadog, Grafana) alert that a server is failing, they rarely show the kernel-level root cause. Legacy CLI tools (`top`, `strace`, `tcpdump`) are fragmented and risky under load. **eprobe** is an **open-source**, on-demand diagnostic tool that unifies host signals and **Diagnostic Modules** into a **Single Pane of Glass**:
 
 | Pillar | How eprobe Solves It |
 | :--- | :--- |
-| ⚡ **Ephemeral & Zero-Instrumentation** | Single statically compiled binary (&lt;25MB). Injects read-only eBPF bytecode on demand; leaves **zero background daemons or sidecars** on the host. Clean detach with `Ctrl+C` or `q` terminates probes instantly. |
-| 🔬 **High-Resolution Kernel Correlation** | Direct in-kernel correlation of off-CPU scheduler stalls, futex lockups, D-state disk sleep, cgroup CPU throttling, and network sockets to PIDs/TIDs with **&lt;1% CPU overhead**. |
-| 🛡️ **Air-Gapped, BYO-LLM Root Cause Analysis** | Zero cloud egress required. Generates sanitized client-side `.zip` incident archives containing `00_PROMPT_COPY_PASTE.md` and statistical health profiles (`01_EXECUTIVE_SUMMARY.md`) for private Claude, ChatGPT, or local Ollama instances with **zero data leaks**. |
+| ⚡ **On-Demand & Zero Agents Left Behind** | Single statically compiled open-source binary (&lt;25MB). Loads read-only eBPF **Diagnostic Modules** on demand with **&lt;1% CPU overhead** and **zero 24/7 background daemons**. Clean detach with `Ctrl+C` or `q` unloads probes instantly. |
+| 🖥️ **Single Pane of Glass (Local TUI or Web UI)** | Correlates CPU & thread locks, system security & audit, disk I/O, network/TLS traffic, and Docker/MySQL apps in real time—viewable locally in the `eprobe` Text Console or online in the `eprobe.io` Web Console. |
+| 🤖 **Anonymized AI Bundle (IPs & Secrets Masked)** | One-click `.zip` export (`00_PROMPT_COPY_PASTE.md` + `01_EXECUTIVE_SUMMARY.md`) with automatic IP, token, and password masking—ready for **Claude, ChatGPT, Gemini & Ollama** with **zero data leaks**. |
 
 ---
 
@@ -155,7 +156,7 @@ When running in interactive TUI mode (`eprobe run <module>`), navigate smoothly 
 | **`m`** | **Maximize / Restore** | Expands the focused pane to 100% full screen (press again to restore) |
 | **`Enter`** | **Inspect Event** | Opens deep inspection modal (shows full SQL queries, HTTP payloads, headers) |
 | **`/`** | **Dynamic Filter** | Activates real-time substring filtering on active stream or leaderboard |
-| **`Space` / `p`** | **Pause / Resume** | Freezes live stream to inspect high-frequency events without terminal jitter |
+| **`Space` / `p`** | **Pause / Resume** | Pauses live stream to inspect high-frequency events without terminal jitter |
 | **`↑` / `↓`** | **Navigate Rows** | Moves selection cursor through table events or trace tree nodes |
 | **`←` / `→`** | **Fold / Unfold Tree** | Collapses or expands the selected trace tree branch |
 | **`e`** | **Toggle All Branches** | Expands or collapses all branches across the entire trace tree |
