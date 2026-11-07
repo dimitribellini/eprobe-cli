@@ -464,7 +464,9 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		fmt.Println("\nStopping eprobe...")
+		if opts.OutputFormat != "tui" && opts.StreamToken == "" {
+			fmt.Println("\nStopping eprobe...")
+		}
 		cancel()
 	}()
 
@@ -481,6 +483,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer lm.Close()
+
+	if ctx.Err() != nil {
+		return
+	}
 
 	fmt.Println("Listening for kernel events... Press Ctrl+C to exit.")
 

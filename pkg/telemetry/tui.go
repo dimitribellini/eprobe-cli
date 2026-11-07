@@ -3,7 +3,10 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 
@@ -99,6 +103,7 @@ type paneEventMsg struct {
 	PageIdx int
 	PaneIdx int
 	Event   map[string]interface{}
+	Events  []map[string]interface{}
 }
 
 type tickMsg struct {
@@ -116,6 +121,9 @@ type PaneModel struct {
 	Aggregator    *Aggregator
 	Table         table.Model
 	ActiveCols    []registry.ColumnHint
+	FormattedRows []table.Row
+	NeedsRebuild  bool
+	TableDirty    bool
 	Viewport      viewport.Model
 	EventChan     chan map[string]interface{}
 	IsInspectMode bool
@@ -184,7 +192,9 @@ func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	for pIdx := range m.pages {
 		for i := range m.pages[pIdx] {
-			cmds = append(cmds, listenToPaneEvents(pIdx, i, m.pages[pIdx][i].EventChan))
+			if m.pages[pIdx][i].HashMapRef == nil {
+				cmds = append(cmds, listenToPaneEvents(pIdx, i, m.pages[pIdx][i].EventChan))
+			}
 		}
 	}
 	cmds = append(cmds, tickRate())
@@ -193,8 +203,31 @@ func (m Model) Init() tea.Cmd {
 
 func listenToPaneEvents(pageIdx, paneIdx int, ch chan map[string]interface{}) tea.Cmd {
 	return func() tea.Msg {
-		e := <-ch
-		return paneEventMsg{PageIdx: pageIdx, PaneIdx: paneIdx, Event: e}
+		first, ok := <-ch
+		if !ok {
+			return nil
+		}
+		// Coalesce bursty events for up to 25ms (~40 FPS max per pane) to prevent
+		// starving BubbleTea's unbuffered message loop under high-rate kernel tracepoints.
+		time.Sleep(25 * time.Millisecond)
+		events := make([]map[string]interface{}, 0, 64)
+		if first != nil {
+			events = append(events, first)
+		}
+		for len(events) < 2048 {
+			select {
+			case next, ok := <-ch:
+				if !ok {
+					return paneEventMsg{PageIdx: pageIdx, PaneIdx: paneIdx, Events: events}
+				}
+				if next != nil {
+					events = append(events, next)
+				}
+			default:
+				return paneEventMsg{PageIdx: pageIdx, PaneIdx: paneIdx, Events: events}
+			}
+		}
+		return paneEventMsg{PageIdx: pageIdx, PaneIdx: paneIdx, Events: events}
 	}
 }
 
@@ -202,6 +235,189 @@ func tickRate() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg{Time: t}
 	})
+}
+
+func (m Model) eventMatchesFilter(e map[string]interface{}, filter string, searchFields []string) bool {
+	if filter == "" || len(searchFields) == 0 {
+		return true
+	}
+	for _, field := range searchFields {
+		if val, ok := e[field]; ok {
+			if strings.Contains(strings.ToLower(fmt.Sprint(val)), filter) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m Model) formatStreamRow(e map[string]interface{}, columns []registry.ColumnHint) table.Row {
+	row := make(table.Row, 0, len(columns))
+	for _, col := range columns {
+		var valStr string
+		if col.Field == "time" || col.Field == "timestamp" {
+			if tVal, ok := e[col.Field]; ok && tVal != nil && fmt.Sprint(tVal) != "" {
+				valStr = sanitizeString(fmt.Sprint(tVal))
+			} else if tVal, ok := e["_tui_time"]; ok && tVal != nil {
+				valStr = fmt.Sprint(tVal)
+			} else {
+				valStr = time.Now().Format("15:04:05")
+			}
+		} else if val, ok := e[col.Field]; ok {
+			if col.Field == "level" || col.Field == "severity" || col.Format == "level" {
+				str, style := FormatSeverity(val)
+				valStr = style.Render(str)
+			} else if IsLatencyField(col.Field, col.Format) {
+				str, style := FormatLatency(val, col.Field)
+				valStr = style.Render(str)
+			} else {
+				var strVal string
+				if s, isStr := val.(string); isStr {
+					strVal = s
+				} else {
+					strVal = fmt.Sprint(val)
+				}
+				if col.Field == "container_id" || col.Format == "container_id" {
+					strVal = m.resolveContainer(strVal)
+				}
+				valStr = sanitizeString(strVal)
+			}
+		}
+		row = append(row, valStr)
+	}
+	return row
+}
+
+func (m *Model) syncStreamPaneTable(pane *PaneModel) {
+	if pane.Def.Type != "stream" {
+		return
+	}
+	if pane.NeedsRebuild {
+		columns := pane.Def.Columns
+		if len(pane.ActiveCols) > 0 {
+			columns = pane.ActiveCols
+		}
+		allEvents := pane.Buffer.GetAll()
+		rows := make([]table.Row, 0, len(allEvents))
+		filter := strings.ToLower(pane.FilterQuery)
+		searchFields := pane.Def.SearchableFields
+		for _, e := range allEvents {
+			if !m.eventMatchesFilter(e, filter, searchFields) {
+				continue
+			}
+			rows = append(rows, m.formatStreamRow(e, columns))
+		}
+		pane.FormattedRows = rows
+		pane.NeedsRebuild = false
+		pane.TableDirty = true
+	}
+	if pane.TableDirty {
+		pane.Table.SetRows(pane.FormattedRows)
+		pane.Table.GotoBottom()
+		pane.TableDirty = false
+	}
+}
+
+func (m *Model) syncActivePageTables() {
+	if m.activePageIndex < 0 || m.activePageIndex >= len(m.pages) {
+		return
+	}
+	for i := range m.pages[m.activePageIndex] {
+		m.syncStreamPaneTable(&m.pages[m.activePageIndex][i])
+	}
+}
+
+func (m *Model) applyWindowSize(width, height int) {
+	if width <= 0 || height <= 0 {
+		return
+	}
+	m.termWidth = width
+	m.termHeight = height
+	m.width = width - 2 // Prevent bottom-right character wrap scrolling
+	if m.width < 10 {
+		m.width = 10
+	}
+	m.height = height
+	headerHeight := 3
+	footerHeight := 3
+	viewportHeight := m.height - headerHeight - footerHeight
+	if viewportHeight < 0 {
+		viewportHeight = 0
+	}
+
+	for pIdx := range m.pages {
+		for i := range m.pages[pIdx] {
+			wPct, _ := parsePct(m.pages[pIdx][i].Def.Position.Width)
+			hPct, _ := parsePct(m.pages[pIdx][i].Def.Position.Height)
+			if wPct == 0 {
+				wPct = 1.0
+			}
+			if hPct == 0 {
+				hPct = 1.0
+			}
+
+			pWidth := int(float64(m.width)*wPct) - 2           // -2 for borders
+			pHeight := int(float64(viewportHeight)*hPct) - 3 // -3 for borders and title
+
+			isMaximizedPane := m.isMaximized && pIdx == m.activePageIndex && i == m.activePaneIndex
+			if m.pages[pIdx][i].IsInspectMode || isMaximizedPane {
+				pWidth = m.width - 2
+				pHeight = viewportHeight - 3
+			}
+
+			if pWidth < 10 {
+				pWidth = 10
+			}
+			if pHeight < 5 {
+				pHeight = 5
+			}
+
+			m.pages[pIdx][i].Table.SetWidth(pWidth)
+			m.pages[pIdx][i].Table.SetHeight(pHeight)
+			m.pages[pIdx][i].Viewport.Width = pWidth
+			m.pages[pIdx][i].Viewport.Height = pHeight
+
+			// Resize columns intelligently
+			if len(m.pages[pIdx][i].Def.Columns) > 0 {
+				cols, activeCols := budgetColumns(m.pages[pIdx][i].Def.Columns, pWidth, isMaximizedPane)
+				prevActiveLen := len(m.pages[pIdx][i].ActiveCols)
+				m.pages[pIdx][i].Table.SetColumns(cols)
+				m.pages[pIdx][i].ActiveCols = activeCols
+				if len(activeCols) != prevActiveLen {
+					m.pages[pIdx][i].NeedsRebuild = true
+				}
+			} else if m.pages[pIdx][i].Def.Type == "top" {
+				var cols []table.Column
+				keyTitle := "KEY"
+				valTitle := "COUNT"
+				if len(m.pages[pIdx][i].Def.AggregateBy) > 0 {
+					agg := m.pages[pIdx][i].Def.AggregateBy[0]
+					keyTitle = FormatColumnTitle(agg.Field, "")
+					if agg.Label != "" {
+						valTitle = strings.ToUpper(agg.Label)
+					}
+				}
+
+				valWidth := 13
+				overhead := 4 // 2 columns * 2 chars overhead
+				keyWidth := pWidth - valWidth - overhead
+				if keyWidth < 12 {
+					keyWidth = 12
+				}
+
+				cols = []table.Column{
+					{Title: keyTitle, Width: keyWidth},
+					{Title: valTitle, Width: valWidth},
+				}
+				m.pages[pIdx][i].Table.SetColumns(cols)
+			}
+		}
+	}
+
+	m.help.Width = m.width
+	if !m.showBriefModal && !m.helpMode {
+		m.syncActivePageTables()
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -215,19 +431,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.isSearching = false
 				active := &m.pages[m.activePageIndex][m.activePaneIndex]
 				active.FilterQuery = m.searchInput.Value()
-				
+
 				if active.IsInspectMode {
 					m.rebuildInspectViewport(active)
 				}
-				
-				// Trigger a re-render of stream panes by sending a dummy event
-				if len(m.pages[m.activePageIndex]) > m.activePaneIndex {
-					pane := &m.pages[m.activePageIndex][m.activePaneIndex]
-					if pane.Def.Type == "stream" {
-						go func() {
-							pane.EventChan <- nil
-						}()
-					}
+
+				if active.Def.Type == "stream" {
+					active.NeedsRebuild = true
+					m.syncStreamPaneTable(active)
 				}
 				return m, nil
 			}
@@ -247,10 +458,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyEnter || msg.String() == " " || key.Matches(msg, m.keys.Help) {
 				m.showBriefModal = false
+				m.syncActivePageTables()
 				return m, nil
 			}
 			if key.Matches(msg, m.keys.NextPage) || key.Matches(msg, m.keys.PrevPage) {
 				m.showBriefModal = false
+				m.syncActivePageTables()
 				// continue below for page navigation
 			} else {
 				return m, nil
@@ -263,6 +476,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keys.Help) {
 			m.helpMode = !m.helpMode
 			m.help.ShowAll = m.helpMode
+			if !m.helpMode {
+				m.syncActivePageTables()
+			}
 			return m, nil
 		}
 		if key.Matches(msg, m.keys.Pause) {
@@ -436,79 +652,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.termWidth = msg.Width
-		m.termHeight = msg.Height
-		m.width = msg.Width - 2 // Prevent bottom-right character wrap scrolling
-		m.height = msg.Height
-		headerHeight := 3
-		footerHeight := 3
-		viewportHeight := m.height - headerHeight - footerHeight
-		if viewportHeight < 0 {
-			viewportHeight = 0
-		}
-
-		for pIdx := range m.pages {
-			for i := range m.pages[pIdx] {
-				wPct, _ := parsePct(m.pages[pIdx][i].Def.Position.Width)
-				hPct, _ := parsePct(m.pages[pIdx][i].Def.Position.Height)
-				if wPct == 0 { wPct = 1.0 }
-				if hPct == 0 { hPct = 1.0 }
-
-				pWidth := int(float64(m.width) * wPct) - 2 // -2 for borders
-				pHeight := int(float64(viewportHeight) * hPct) - 3 // -3 for borders and title
-
-				isMaximizedPane := m.isMaximized && pIdx == m.activePageIndex && i == m.activePaneIndex
-				if m.pages[pIdx][i].IsInspectMode || isMaximizedPane {
-					pWidth = m.width - 2
-					pHeight = viewportHeight - 3
-				}
-
-				if pWidth < 10 { pWidth = 10 }
-				if pHeight < 5 { pHeight = 5 }
-
-				m.pages[pIdx][i].Table.SetWidth(pWidth)
-				m.pages[pIdx][i].Table.SetHeight(pHeight)
-				m.pages[pIdx][i].Viewport.Width = pWidth
-				m.pages[pIdx][i].Viewport.Height = pHeight
-
-				// Resize columns intelligently
-				if len(m.pages[pIdx][i].Def.Columns) > 0 {
-					cols, activeCols := budgetColumns(m.pages[pIdx][i].Def.Columns, pWidth, isMaximizedPane)
-					m.pages[pIdx][i].Table.SetColumns(cols)
-					m.pages[pIdx][i].ActiveCols = activeCols
-				} else if m.pages[pIdx][i].Def.Type == "top" {
-					var cols []table.Column
-					keyTitle := "KEY"
-					valTitle := "COUNT"
-					if len(m.pages[pIdx][i].Def.AggregateBy) > 0 {
-						agg := m.pages[pIdx][i].Def.AggregateBy[0]
-						keyTitle = FormatColumnTitle(agg.Field, "")
-						if agg.Label != "" {
-							valTitle = strings.ToUpper(agg.Label)
-						}
-					}
-					
-					valWidth := 13
-					overhead := 4 // 2 columns * 2 chars overhead
-					keyWidth := pWidth - valWidth - overhead
-					if keyWidth < 12 { keyWidth = 12 }
-					
-					cols = []table.Column{
-						{Title: keyTitle, Width: keyWidth},
-						{Title: valTitle, Width: valWidth},
-					}
-					m.pages[pIdx][i].Table.SetColumns(cols)
-				}
-			}
-		}
-		
-		m.help.Width = m.width
+		m.applyWindowSize(msg.Width, msg.Height)
 		return m, nil
 
 	case tickMsg:
 		m.rate = m.rateCounter
 		m.rateCounter = 0
-		
+
 		for pIdx := range m.pages {
 			for i := range m.pages[pIdx] {
 				pane := &m.pages[pIdx][i]
@@ -545,87 +695,69 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenToPaneEvents(msg.PageIdx, msg.PaneIdx, m.pages[msg.PageIdx][msg.PaneIdx].EventChan)
 		}
 
-		if msg.PageIdx == m.activePageIndex {
-			m.totalEvents++
-			m.rateCounter++
+		pane := &m.pages[msg.PageIdx][msg.PaneIdx]
+		events := msg.Events
+		if msg.Event != nil {
+			events = append(events, msg.Event)
 		}
 
-		pane := &m.pages[msg.PageIdx][msg.PaneIdx]
-		if msg.Event != nil {
-			pane.Buffer.Push(msg.Event)
-			pane.Aggregator.Update(msg.Event, pane.Def.AggregateBy)
+		if len(events) == 0 && pane.Def.Type == "stream" {
+			pane.NeedsRebuild = true
+			if msg.PageIdx == m.activePageIndex && !m.showBriefModal && !m.helpMode {
+				m.syncStreamPaneTable(pane)
+			}
+			return m, listenToPaneEvents(msg.PageIdx, msg.PaneIdx, pane.EventChan)
+		}
+
+		columns := pane.Def.Columns
+		if len(pane.ActiveCols) > 0 {
+			columns = pane.ActiveCols
+		}
+		filter := strings.ToLower(pane.FilterQuery)
+		searchFields := pane.Def.SearchableFields
+		nowStr := time.Now().Format("15:04:05")
+
+		for _, e := range events {
+			if e == nil {
+				continue
+			}
+			if msg.PageIdx == m.activePageIndex {
+				m.totalEvents++
+				m.rateCounter++
+			}
+			if _, ok := e["time"]; !ok {
+				if _, okTs := e["timestamp"]; !okTs {
+					if _, okTui := e["_tui_time"]; !okTui {
+						e["_tui_time"] = nowStr
+					}
+				}
+			}
+
+			pane.Buffer.Push(e)
+			pane.Aggregator.Update(e, pane.Def.AggregateBy)
 			if pane.Histogram != nil {
-				pane.Histogram.Update(msg.Event)
+				pane.Histogram.Update(e)
 			}
 			if pane.Sparkline != nil {
-				pane.Sparkline.Update(msg.Event)
+				pane.Sparkline.Update(e)
 			}
 			if pane.TraceTree != nil {
-				pane.TraceTree.Update(msg.Event)
+				pane.TraceTree.Update(e)
+			}
+
+			if pane.Def.Type == "stream" && !pane.NeedsRebuild {
+				if m.eventMatchesFilter(e, filter, searchFields) {
+					pane.FormattedRows = append(pane.FormattedRows, m.formatStreamRow(e, columns))
+					if filter == "" && len(pane.FormattedRows) > 10000 {
+						pane.FormattedRows = pane.FormattedRows[len(pane.FormattedRows)-10000:]
+					}
+					pane.TableDirty = true
+				}
 			}
 		}
 
-		if pane.Def.Type == "stream" {
-			columns := pane.Def.Columns
-			if len(pane.ActiveCols) > 0 {
-				columns = pane.ActiveCols
-			}
-			allEvents := pane.Buffer.GetAll()
-			var rows []table.Row
-			filter := strings.ToLower(pane.FilterQuery)
-			searchFields := pane.Def.SearchableFields
-			
-			for _, e := range allEvents {
-				if filter != "" && len(searchFields) > 0 {
-					matched := false
-					for _, field := range searchFields {
-						if val, ok := e[field]; ok {
-							if strings.Contains(strings.ToLower(fmt.Sprint(val)), filter) {
-								matched = true
-								break
-							}
-						}
-					}
-					if !matched {
-						continue
-					}
-				}
-				
-				var row table.Row
-				for _, col := range columns {
-					var valStr string
-					if col.Field == "time" || col.Field == "timestamp" {
-						if tVal, ok := e[col.Field]; ok && tVal != nil && fmt.Sprint(tVal) != "" {
-							valStr = sanitizeString(fmt.Sprint(tVal))
-						} else {
-							valStr = time.Now().Format("15:04:05")
-						}
-					} else if val, ok := e[col.Field]; ok {
-						if col.Field == "level" || col.Field == "severity" || col.Format == "level" {
-							str, style := FormatSeverity(val)
-							valStr = style.Render(str)
-						} else if IsLatencyField(col.Field, col.Format) {
-							str, style := FormatLatency(val, col.Field)
-							valStr = style.Render(str)
-						} else {
-							var strVal string
-							if s, isStr := val.(string); isStr {
-								strVal = s
-							} else {
-								strVal = fmt.Sprint(val)
-							}
-							if col.Field == "container_id" || col.Format == "container_id" {
-								strVal = m.resolveContainer(strVal)
-							}
-							valStr = sanitizeString(strVal)
-						}
-					}
-					row = append(row, valStr)
-				}
-				rows = append(rows, row)
-			}
-			pane.Table.SetRows(rows)
-			pane.Table.GotoBottom()
+		if pane.Def.Type == "stream" && msg.PageIdx == m.activePageIndex && !m.showBriefModal && !m.helpMode {
+			m.syncStreamPaneTable(pane)
 		}
 
 		return m, listenToPaneEvents(msg.PageIdx, msg.PaneIdx, pane.EventChan)
@@ -1487,6 +1619,10 @@ func initTopTable(def registry.TUIPane) table.Model {
 }
 
 func StartTUI(ctx context.Context, bpfMaps map[string]*ebpf.Map, manifest *registry.Manifest, version string, filterCfg FilterConfig, streamer *Streamer) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	var droppedCounter int64
 
 	ti := textinput.New()
@@ -1576,30 +1712,34 @@ func StartTUI(ctx context.Context, bpfMaps map[string]*ebpf.Map, manifest *regis
 		}
 	}
 
+	if len(m.pages) > 0 && len(m.pages[0]) > 0 && (manifest == nil || manifest.TUIHints.Pages[0].Panes[0].InspectPayload == "") {
+		// Just a visual hint override
+		m.keys.Enter.SetEnabled(true) // we upgraded Enter to always work in v3.1+
+	}
+
+	initW, initH := 120, 40
+	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil && w > 0 && h > 0 {
+		initW, initH = w, h
+	}
+	m.applyWindowSize(initW, initH)
+
+	p := tea.NewProgram(
+		&m,
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+		tea.WithContext(ctx),
+	)
+
 	for mapName, chans := range mapChans {
 		if bpfMap, ok := bpfMaps[mapName]; ok {
 			go runMapReader(ctx, bpfMap, manifest.GetMapByName(mapName), chans, &droppedCounter, filterCfg, streamer)
 		}
 	}
 
-	if len(m.pages) > 0 && len(m.pages[0]) > 0 && (manifest == nil || manifest.TUIHints.Pages[0].Panes[0].InspectPayload == "") {
-		// Just a visual hint override
-		m.keys.Enter.SetEnabled(true) // we upgraded Enter to always work in v3.1+
-	}
-
-	p := tea.NewProgram(
-		&m,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
-
-	// Handle graceful closure when context is cancelled externally
-	go func() {
-		<-ctx.Done()
-		p.Send(tea.Quit())
-	}()
-
 	_, err := p.Run()
+	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, tea.ErrInterrupted) || ctx.Err() != nil {
+		return nil
+	}
 	return err
 }
 
@@ -1620,10 +1760,15 @@ func runMapReader(ctx context.Context, bpfMap *ebpf.Map, mapSpec *registry.MapSp
 		schema = mapSpec.EventSchema
 	}
 
+	var readCount uint64
 	for {
 		record, err := rd.Read()
 		if err != nil {
 			return
+		}
+		readCount++
+		if readCount&0xFF == 0 {
+			runtime.Gosched()
 		}
 
 		e, err := DecodeDynamicEvent(record.RawSample, schema)

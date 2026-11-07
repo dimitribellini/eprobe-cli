@@ -2,12 +2,15 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 )
 
 type streamTickMsg time.Time
@@ -211,14 +214,19 @@ func formatBytes(b int64) string {
 
 // RunStreamMonitor launches the dedicated Bubbletea streaming monitor.
 func RunStreamMonitor(ctx context.Context, streamer *Streamer, moduleName, version string) error {
+	if ctx.Err() != nil {
+		return nil
+	}
 	m := newStreamModel(streamer, moduleName, version)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-
-	go func() {
-		<-ctx.Done()
-		p.Send(tea.Quit())
-	}()
+	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil && w > 0 && h > 0 {
+		m.width = w
+		m.height = h
+	}
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 
 	_, err := p.Run()
+	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, tea.ErrInterrupted) || ctx.Err() != nil {
+		return nil
+	}
 	return err
 }

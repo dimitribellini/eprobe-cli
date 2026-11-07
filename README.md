@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://eprobe.io/"><img src="https://img.shields.io/badge/Website-eprobe.io-00D26A?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Website" /></a>
   <a href="https://github.com/dimitribellini/eprobe-cli/releases/latest"><img src="https://img.shields.io/github/v/release/dimitribellini/eprobe-cli?style=for-the-badge&logo=github&label=Release&color=blue" alt="Release" /></a>
-  <img src="https://img.shields.io/badge/Linux-Kernel%205.8%2B%20CO--RE-orange?style=for-the-badge&logo=linux&logoColor=white" alt="Kernel" />
+  <img src="https://img.shields.io/badge/Linux-Kernel%205.8--7.0%2B%20CO--RE-orange?style=for-the-badge&logo=linux&logoColor=white" alt="Kernel" />
   <img src="https://img.shields.io/badge/Binary-%3C25MB%20Static-purple?style=for-the-badge" alt="Binary Size" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License" /></a>
 </p>
@@ -61,7 +61,7 @@ eprobe version
 > ```
 > 
 > *Need a pinned version? Use the tagged release syntax:*
-> `curl -sSL https://github.com/dimitribellini/eprobe-cli/releases/download/v0.0.87/eprobe-v0.0.87-linux-amd64 -o eprobe`
+> `curl -sSL https://github.com/dimitribellini/eprobe-cli/releases/download/v0.0.88/eprobe-v0.0.88-linux-amd64 -o eprobe`
 
 ### 2. Triage Your First Incident (Instant Run)
 
